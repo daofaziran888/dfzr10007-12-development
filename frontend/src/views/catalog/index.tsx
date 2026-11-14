@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 
-import { request } from '@/api/client'
+import { readActionMessage, request } from '@/api/client'
 
 const ENDPOINT = '/api/catalog'
 const columns = [
   "条目编号",
   "数据集名称",
   "业务域",
-  "字段清单",
+  "数据集编号",
   "更新频率",
   "数据等级",
   "负责人",
@@ -24,28 +24,23 @@ const statuses = [
   "已下线",
   "已归档"
 ]
-const stats = [
-  {
-    "label": "目录条目总数",
-    "value": 0
-  },
-  {
-    "label": "已发布条目",
-    "value": 0
-  },
-  {
-    "label": "已下线条目",
-    "value": 0
-  }
-]
 
-type Row = Record<string, string | number | null>
+type FieldDef = { 字段名: string; 类型: string; 说明: string }
+
+type Row = Record<string, string | number | boolean | null | undefined> & {
+  字段清单?: FieldDef[]
+  字段清单来源?: string
+  字段数?: number
+  readonly?: boolean
+}
 
 export default function CatalogView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [message, setMessage] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
+  const [expanded, setExpanded] = useState<number | null>(null)
   const filterFields = useMemo(() => columns.slice(0, 3), [])
 
   const reload = useCallback(async () => {
@@ -66,23 +61,37 @@ export default function CatalogView() {
 
   useEffect(() => {
     void reload()
+    function onIdentity() {
+      void reload()
+    }
+    window.addEventListener('identity-changed', onIdentity)
+    return () => window.removeEventListener('identity-changed', onIdentity)
   }, [reload])
 
   async function runAction(action: string, row: Row) {
+    setMessage('')
     setErrorMessage('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ values: { action } }),
       })
+      const text = await readActionMessage(response, '数据目录检索动作未生效，请稍后重试')
       if (!response.ok) {
-        throw new Error('数据目录检索动作未生效，请稍后重试')
+        throw new Error(text)
       }
+      setMessage(text)
       await reload()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '数据目录检索操作失败')
     }
   }
+
+  const stats = useMemo(() => [
+    { label: '目录条目总数', value: total },
+    { label: '已发布条目', value: rows.filter((row) => row.status === '已发布').length },
+    { label: '已下线条目', value: rows.filter((row) => row.status === '已下线').length },
+  ], [rows, total])
 
   return (
     <section className="page" data-module="catalog">
@@ -129,25 +138,52 @@ export default function CatalogView() {
         <thead>
           <tr>
             {columns.map((column) => <th key={column}>{column}</th>)}
+            <th>字段清单</th>
             <th>可执行动作</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
-              <td className="row-actions">
-                {actions.map((action) => (
-                  <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>
-                    {action}
+            <Fragment key={String(row.id)}>
+              <tr>
+                {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
+                <td>
+                  <button className="link" type="button" onClick={() => setExpanded((prev) => (prev === row.id ? null : Number(row.id)))}>
+                    {row.字段数 ?? 0} 个字段（{expanded === row.id ? '收起' : '展开'}）
                   </button>
-                ))}
-              </td>
-            </tr>
+                </td>
+                <td className="row-actions">
+                  {row.readonly ? (
+                    <span className="muted-text">只读</span>
+                  ) : (
+                    actions.map((action) => (
+                      <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>
+                        {action}
+                      </button>
+                    ))
+                  )}
+                </td>
+              </tr>
+              {expanded === row.id && (
+                <tr>
+                  <td colSpan={columns.length + 2}>
+                    <p className="muted-text">{row.字段清单来源}</p>
+                    <ul className="plain-list">
+                      {(row.字段清单 ?? []).map((field) => (
+                        <li key={field.字段名}>
+                          <code>{field.字段名}</code> · {field.类型} · {field.说明}
+                        </li>
+                      ))}
+                      {(row.字段清单 ?? []).length === 0 && <li className="muted-text">未关联共用字段清单</li>}
+                    </ul>
+                  </td>
+                </tr>
+              )}
+            </Fragment>
           ))}
           {rows.length === 0 && (
             <tr>
-              <td className="empty-state" colSpan={columns.length + 1}>暂无数据目录检索数据，可先登记目录条目</td>
+              <td className="empty-state" colSpan={columns.length + 2}>暂无数据目录检索数据，可先登记目录条目</td>
             </tr>
           )}
         </tbody>
@@ -155,6 +191,7 @@ export default function CatalogView() {
 
       <footer className="page-foot">
         <span>共 {total} 条数据目录检索记录</span>
+        {message && <span className="ok-text">{message}</span>}
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>
